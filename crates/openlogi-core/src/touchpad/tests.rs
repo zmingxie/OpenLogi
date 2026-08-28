@@ -61,7 +61,7 @@ fn a_short_still_stroke_commits_a_tap_only_when_it_ends() {
         GestureRecognition::Pending
     );
 
-    assert_eq!(recognizer.end(), Some(TouchpadGesture::ThreeFingerTap));
+    assert_eq!(recognizer.end(), Some(ButtonId::TouchpadThreeFingerTap));
     assert_eq!(recognizer.end(), None);
 }
 
@@ -72,7 +72,7 @@ fn three_finger_swipes_commit_at_most_once_per_stroke() {
 
     assert_eq!(
         recognizer.update(&translated_frame(60_000, 3, 15_000, 0)),
-        GestureRecognition::Gesture(TouchpadGesture::ThreeFingerSwipeRight)
+        GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeRight)
     );
     assert_eq!(
         recognizer.update(&translated_frame(90_000, 3, 25_000, 0)),
@@ -91,19 +91,19 @@ fn cardinal_swipes_keep_the_locked_finger_count_and_direction() {
 
     assert_eq!(
         recognize(3, -15_000, 0),
-        GestureRecognition::Gesture(TouchpadGesture::ThreeFingerSwipeLeft)
+        GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeLeft)
     );
     assert_eq!(
         recognize(3, 0, -15_000),
-        GestureRecognition::Gesture(TouchpadGesture::ThreeFingerSwipeUp)
+        GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeUp)
     );
     assert_eq!(
         recognize(4, 0, 15_000),
-        GestureRecognition::Gesture(TouchpadGesture::FourFingerSwipeDown)
+        GestureRecognition::Gesture(ButtonId::TouchpadFourFingerSwipeDown)
     );
     assert_eq!(
         recognize(4, 15_000, 0),
-        GestureRecognition::Gesture(TouchpadGesture::FourFingerSwipeRight)
+        GestureRecognition::Gesture(ButtonId::TouchpadFourFingerSwipeRight)
     );
 }
 
@@ -119,7 +119,7 @@ fn spread_dominance_commits_pinch_in_and_out() {
             60_000,
             vec![contact(1, 20_000, 50_000), contact(2, 80_000, 50_000)],
         )),
-        GestureRecognition::Gesture(TouchpadGesture::TwoFingerPinchOut)
+        GestureRecognition::Gesture(ButtonId::TouchpadTwoFingerPinchOut)
     );
 
     let mut inward = TouchpadGestureRecognizer::default();
@@ -142,7 +142,7 @@ fn spread_dominance_commits_pinch_in_and_out() {
                 contact(4, 60_000, 52_000),
             ],
         )),
-        GestureRecognition::Gesture(TouchpadGesture::FourFingerPinchIn)
+        GestureRecognition::Gesture(ButtonId::TouchpadFourFingerPinchIn)
     );
 }
 
@@ -204,22 +204,6 @@ fn cancellation_suppresses_frames_until_the_stroke_ends() {
     recognizer.update(&translated_frame(200_000, 3, 0, 0));
     assert_eq!(
         recognizer.update(&translated_frame(260_000, 3, 15_000, 0)),
-        GestureRecognition::Gesture(TouchpadGesture::ThreeFingerSwipeRight)
-    );
-}
-
-#[test]
-fn every_gesture_maps_to_its_dedicated_trigger() {
-    assert_eq!(
-        TouchpadGesture::TwoFingerPinchIn.trigger(),
-        ButtonId::TouchpadTwoFingerPinchIn
-    );
-    assert_eq!(
-        TouchpadGesture::ThreeFingerSwipeUp.trigger(),
-        ButtonId::TouchpadThreeFingerSwipeUp
-    );
-    assert_eq!(
-        TouchpadGesture::FourFingerPinchOut.trigger(),
-        ButtonId::TouchpadFourFingerPinchOut
+        GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeRight)
     );
 }

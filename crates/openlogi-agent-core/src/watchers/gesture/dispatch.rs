@@ -7,9 +7,7 @@ use std::time::Instant;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
-use openlogi_core::touchpad::{
-    GestureRecognition, TouchFrame, TouchpadGesture, TouchpadGestureRecognizer,
-};
+use openlogi_core::touchpad::{GestureRecognition, TouchFrame, TouchpadGestureRecognizer};
 use openlogi_hid::CapturedInput;
 use tracing::debug;
 
@@ -117,10 +115,10 @@ impl TouchpadRuntime {
             self.frozen_actions_enabled = actions_enabled;
         }
         match self.recognizer.update(frame) {
-            GestureRecognition::Gesture(gesture)
+            GestureRecognition::Gesture(trigger)
                 if self.frozen_actions_enabled && actions_enabled =>
             {
-                self.action(gesture)
+                self.action(trigger)
             }
             GestureRecognition::Pending
             | GestureRecognition::NativeScroll
@@ -133,7 +131,7 @@ impl TouchpadRuntime {
             .recognizer
             .end()
             .filter(|_| self.frozen_actions_enabled && actions_enabled)
-            .and_then(|gesture| self.action(gesture));
+            .and_then(|trigger| self.action(trigger));
         self.frozen_bindings = None;
         self.frozen_actions_enabled = false;
         action
@@ -145,8 +143,7 @@ impl TouchpadRuntime {
         self.frozen_actions_enabled = false;
     }
 
-    fn action(&self, gesture: TouchpadGesture) -> Option<(ButtonId, Action)> {
-        let trigger = gesture.trigger();
+    fn action(&self, trigger: ButtonId) -> Option<(ButtonId, Action)> {
         self.frozen_bindings
             .as_ref()?
             .get(&trigger)

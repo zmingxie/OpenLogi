@@ -75,72 +75,13 @@ pub enum TouchFrameError {
     DuplicateContactId,
 }
 
-/// A recognized gesture in the product's 15-slot touchpad vocabulary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TouchpadGesture {
-    /// Two-finger tap.
-    TwoFingerTap,
-    /// Two-finger pinch toward the centre.
-    TwoFingerPinchIn,
-    /// Two-finger pinch away from the centre.
-    TwoFingerPinchOut,
-    /// Three-finger tap.
-    ThreeFingerTap,
-    /// Three-finger upward swipe.
-    ThreeFingerSwipeUp,
-    /// Three-finger downward swipe.
-    ThreeFingerSwipeDown,
-    /// Three-finger leftward swipe.
-    ThreeFingerSwipeLeft,
-    /// Three-finger rightward swipe.
-    ThreeFingerSwipeRight,
-    /// Four-finger tap.
-    FourFingerTap,
-    /// Four-finger upward swipe.
-    FourFingerSwipeUp,
-    /// Four-finger downward swipe.
-    FourFingerSwipeDown,
-    /// Four-finger leftward swipe.
-    FourFingerSwipeLeft,
-    /// Four-finger rightward swipe.
-    FourFingerSwipeRight,
-    /// Four-finger pinch toward the centre.
-    FourFingerPinchIn,
-    /// Four-finger pinch away from the centre.
-    FourFingerPinchOut,
-}
-
-impl TouchpadGesture {
-    /// Binding trigger corresponding to this recognized gesture.
-    #[must_use]
-    pub const fn trigger(self) -> ButtonId {
-        match self {
-            Self::TwoFingerTap => ButtonId::TouchpadTwoFingerTap,
-            Self::TwoFingerPinchIn => ButtonId::TouchpadTwoFingerPinchIn,
-            Self::TwoFingerPinchOut => ButtonId::TouchpadTwoFingerPinchOut,
-            Self::ThreeFingerTap => ButtonId::TouchpadThreeFingerTap,
-            Self::ThreeFingerSwipeUp => ButtonId::TouchpadThreeFingerSwipeUp,
-            Self::ThreeFingerSwipeDown => ButtonId::TouchpadThreeFingerSwipeDown,
-            Self::ThreeFingerSwipeLeft => ButtonId::TouchpadThreeFingerSwipeLeft,
-            Self::ThreeFingerSwipeRight => ButtonId::TouchpadThreeFingerSwipeRight,
-            Self::FourFingerTap => ButtonId::TouchpadFourFingerTap,
-            Self::FourFingerSwipeUp => ButtonId::TouchpadFourFingerSwipeUp,
-            Self::FourFingerSwipeDown => ButtonId::TouchpadFourFingerSwipeDown,
-            Self::FourFingerSwipeLeft => ButtonId::TouchpadFourFingerSwipeLeft,
-            Self::FourFingerSwipeRight => ButtonId::TouchpadFourFingerSwipeRight,
-            Self::FourFingerPinchIn => ButtonId::TouchpadFourFingerPinchIn,
-            Self::FourFingerPinchOut => ButtonId::TouchpadFourFingerPinchOut,
-        }
-    }
-}
-
 /// Observable result of feeding one frame to [`TouchpadGestureRecognizer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GestureRecognition {
     /// No gesture has committed yet.
     Pending,
-    /// A custom gesture committed and should fire once.
-    Gesture(TouchpadGesture),
+    /// A custom gesture committed as its binding trigger and should fire once.
+    Gesture(ButtonId),
     /// Common two-finger motion dominated spread change, so firmware-native
     /// scrolling owns this stroke and OpenLogi must not fire an action.
     NativeScroll,
@@ -219,7 +160,7 @@ impl TouchpadGestureRecognizer {
     }
 
     /// End the current stroke, returning a tap when it stayed short and still.
-    pub fn end(&mut self) -> Option<TouchpadGesture> {
+    pub fn end(&mut self) -> Option<ButtonId> {
         let state = std::mem::take(&mut self.state);
         match state {
             StrokeState::Tracking(stroke) if stroke.is_tap() => stroke.tap_gesture(),
@@ -321,17 +262,17 @@ impl Stroke {
         )
     }
 
-    fn pinch_gesture(&self, outward: bool) -> TouchpadGesture {
+    fn pinch_gesture(&self, outward: bool) -> ButtonId {
         match (self.finger_count, outward) {
-            (2, false) => TouchpadGesture::TwoFingerPinchIn,
-            (2, true) => TouchpadGesture::TwoFingerPinchOut,
-            (4, false) => TouchpadGesture::FourFingerPinchIn,
-            (4, true) => TouchpadGesture::FourFingerPinchOut,
+            (2, false) => ButtonId::TouchpadTwoFingerPinchIn,
+            (2, true) => ButtonId::TouchpadTwoFingerPinchOut,
+            (4, false) => ButtonId::TouchpadFourFingerPinchIn,
+            (4, true) => ButtonId::TouchpadFourFingerPinchOut,
             _ => unreachable!("pinches require two or four fingers"),
         }
     }
 
-    fn swipe_gesture(&self, dx: i64, dy: i64) -> Option<TouchpadGesture> {
+    fn swipe_gesture(&self, dx: i64, dy: i64) -> Option<ButtonId> {
         let (abs_x, abs_y) = (dx.unsigned_abs(), dy.unsigned_abs());
         let (dominant, cross, min_duration) = if abs_x > abs_y {
             (abs_x, abs_y, HORIZONTAL_SWIPE_MIN_DURATION_US)
@@ -349,14 +290,14 @@ impl Stroke {
             return None;
         }
         match (self.finger_count, abs_x > abs_y, dx > 0, dy > 0) {
-            (3, true, true, _) => Some(TouchpadGesture::ThreeFingerSwipeRight),
-            (3, true, false, _) => Some(TouchpadGesture::ThreeFingerSwipeLeft),
-            (3, false, _, true) => Some(TouchpadGesture::ThreeFingerSwipeDown),
-            (3, false, _, false) => Some(TouchpadGesture::ThreeFingerSwipeUp),
-            (4, true, true, _) => Some(TouchpadGesture::FourFingerSwipeRight),
-            (4, true, false, _) => Some(TouchpadGesture::FourFingerSwipeLeft),
-            (4, false, _, true) => Some(TouchpadGesture::FourFingerSwipeDown),
-            (4, false, _, false) => Some(TouchpadGesture::FourFingerSwipeUp),
+            (3, true, true, _) => Some(ButtonId::TouchpadThreeFingerSwipeRight),
+            (3, true, false, _) => Some(ButtonId::TouchpadThreeFingerSwipeLeft),
+            (3, false, _, true) => Some(ButtonId::TouchpadThreeFingerSwipeDown),
+            (3, false, _, false) => Some(ButtonId::TouchpadThreeFingerSwipeUp),
+            (4, true, true, _) => Some(ButtonId::TouchpadFourFingerSwipeRight),
+            (4, true, false, _) => Some(ButtonId::TouchpadFourFingerSwipeLeft),
+            (4, false, _, true) => Some(ButtonId::TouchpadFourFingerSwipeDown),
+            (4, false, _, false) => Some(ButtonId::TouchpadFourFingerSwipeUp),
             _ => None,
         }
     }
@@ -366,11 +307,11 @@ impl Stroke {
             && self.max_contact_travel_um <= TAP_MAX_TRAVEL_UM
     }
 
-    fn tap_gesture(&self) -> Option<TouchpadGesture> {
+    fn tap_gesture(&self) -> Option<ButtonId> {
         match self.finger_count {
-            2 => Some(TouchpadGesture::TwoFingerTap),
-            3 => Some(TouchpadGesture::ThreeFingerTap),
-            4 => Some(TouchpadGesture::FourFingerTap),
+            2 => Some(ButtonId::TouchpadTwoFingerTap),
+            3 => Some(ButtonId::TouchpadThreeFingerTap),
+            4 => Some(ButtonId::TouchpadFourFingerTap),
             _ => None,
         }
     }
