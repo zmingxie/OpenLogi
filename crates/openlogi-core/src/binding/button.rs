@@ -73,10 +73,40 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
-    ///
-    /// Declared last: the TOML config and any serialized form encode the
-    /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// Two-finger tap on a raw-XY touchpad.
+    TouchpadTwoFingerTap,
+    /// Two-finger pinch toward the centre.
+    TouchpadTwoFingerPinchIn,
+    /// Two-finger pinch away from the centre.
+    TouchpadTwoFingerPinchOut,
+    /// Three-finger tap on a raw-XY touchpad.
+    TouchpadThreeFingerTap,
+    /// Three-finger upward swipe.
+    TouchpadThreeFingerSwipeUp,
+    /// Three-finger downward swipe.
+    TouchpadThreeFingerSwipeDown,
+    /// Three-finger leftward swipe.
+    TouchpadThreeFingerSwipeLeft,
+    /// Three-finger rightward swipe.
+    TouchpadThreeFingerSwipeRight,
+    /// Four-finger tap on a raw-XY touchpad.
+    TouchpadFourFingerTap,
+    /// Four-finger upward swipe.
+    TouchpadFourFingerSwipeUp,
+    /// Four-finger downward swipe.
+    TouchpadFourFingerSwipeDown,
+    /// Four-finger leftward swipe.
+    TouchpadFourFingerSwipeLeft,
+    /// Four-finger rightward swipe.
+    TouchpadFourFingerSwipeRight,
+    /// Four-finger pinch toward the centre.
+    TouchpadFourFingerPinchIn,
+    /// Four-finger pinch away from the centre.
+    ///
+    /// Declared last: serialized forms encode the variant index, so new
+    /// identifiers are append-only.
+    TouchpadFourFingerPinchOut,
 }
 
 impl ButtonId {
@@ -115,6 +145,26 @@ impl ButtonId {
         ButtonId::KeyVolumeUp,
     ];
 
+    /// Raw-touchpad gesture triggers, kept separate from [`ButtonId::ALL`] so
+    /// mouse defaults and mouse trigger lists do not acquire touchpad rows.
+    pub const TOUCHPAD_GESTURES: [ButtonId; 15] = [
+        ButtonId::TouchpadTwoFingerTap,
+        ButtonId::TouchpadTwoFingerPinchIn,
+        ButtonId::TouchpadTwoFingerPinchOut,
+        ButtonId::TouchpadThreeFingerTap,
+        ButtonId::TouchpadThreeFingerSwipeUp,
+        ButtonId::TouchpadThreeFingerSwipeDown,
+        ButtonId::TouchpadThreeFingerSwipeLeft,
+        ButtonId::TouchpadThreeFingerSwipeRight,
+        ButtonId::TouchpadFourFingerTap,
+        ButtonId::TouchpadFourFingerSwipeUp,
+        ButtonId::TouchpadFourFingerSwipeDown,
+        ButtonId::TouchpadFourFingerSwipeLeft,
+        ButtonId::TouchpadFourFingerSwipeRight,
+        ButtonId::TouchpadFourFingerPinchIn,
+        ButtonId::TouchpadFourFingerPinchOut,
+    ];
+
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
     /// through (suppressing them would brick the mouse), and the DPI / thumb /
@@ -138,6 +188,12 @@ impl ButtonId {
     #[must_use]
     pub fn is_hidpp_gesture_source(self) -> bool {
         matches!(self, ButtonId::GestureButton | ButtonId::HapticPanel)
+    }
+
+    /// Whether this identifier is one of the raw-touchpad gesture triggers.
+    #[must_use]
+    pub fn is_touchpad_gesture(self) -> bool {
+        Self::TOUCHPAD_GESTURES.contains(&self)
     }
 
     /// Human-readable label for popovers and tooltips.
@@ -166,6 +222,21 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::TouchpadTwoFingerTap => "2-Finger Tap",
+            ButtonId::TouchpadTwoFingerPinchIn => "2-Finger Pinch In",
+            ButtonId::TouchpadTwoFingerPinchOut => "2-Finger Pinch Out",
+            ButtonId::TouchpadThreeFingerTap => "3-Finger Tap",
+            ButtonId::TouchpadThreeFingerSwipeUp => "3-Finger Swipe Up",
+            ButtonId::TouchpadThreeFingerSwipeDown => "3-Finger Swipe Down",
+            ButtonId::TouchpadThreeFingerSwipeLeft => "3-Finger Swipe Left",
+            ButtonId::TouchpadThreeFingerSwipeRight => "3-Finger Swipe Right",
+            ButtonId::TouchpadFourFingerTap => "4-Finger Tap",
+            ButtonId::TouchpadFourFingerSwipeUp => "4-Finger Swipe Up",
+            ButtonId::TouchpadFourFingerSwipeDown => "4-Finger Swipe Down",
+            ButtonId::TouchpadFourFingerSwipeLeft => "4-Finger Swipe Left",
+            ButtonId::TouchpadFourFingerSwipeRight => "4-Finger Swipe Right",
+            ButtonId::TouchpadFourFingerPinchIn => "4-Finger Pinch In",
+            ButtonId::TouchpadFourFingerPinchOut => "4-Finger Pinch Out",
         }
     }
 }

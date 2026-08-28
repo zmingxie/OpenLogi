@@ -34,7 +34,7 @@ be copied manually to the generated physical keys.
 
 ## Shape
 
-`schema_version` is required and currently `5`. `selected_device` is an
+`schema_version` is required and currently `7`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -74,6 +74,12 @@ Common device fields are:
   differently and a profile authored under one namespace will not match under
   another. An overlay holds one action per button; gesture-direction maps live
   in `bindings`
+- `touchpad_gestures.enabled`: opt-in raw-touchpad gesture capture, defaulting
+  to `false`. The 15 `TouchpadTwoFinger…`, `TouchpadThreeFinger…`, and
+  `TouchpadFourFinger…` triggers live in the normal `bindings` and
+  `per_app_bindings` maps. They accept one Action only; long-press and nested
+  directional bindings are rejected. Pointer movement, clicks, two-finger
+  scrolling, and firmware secondary click remain native
 - `action_ring`: default and complete per-application eight-slot layouts
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
@@ -86,7 +92,8 @@ Common device fields are:
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,
-`BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
+`BrowserBack`, `PlayPause`, `CycleDpiPresets`, `ZoomIn`, `ZoomOut`, and
+`ShowActionsRing`.
 Payload actions use a one-key inline table:
 
 ```toml

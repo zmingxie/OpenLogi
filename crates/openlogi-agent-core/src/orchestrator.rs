@@ -30,7 +30,9 @@ use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
+use crate::capture_plan::{
+    DeviceCapturePlan, SharedCapturePlans, plan_for_device_with_touchpad, touchpad_recovery_plan,
+};
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -61,6 +63,15 @@ struct AgentDevice {
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
     online: bool,
+}
+
+impl AgentDevice {
+    fn touchpad_journal_id(&self) -> Option<String> {
+        self.capabilities
+            .is_some_and(|capabilities| capabilities.touchpad_raw_xy)
+            .then(|| DeviceIdentity::from_parts(self.serial.as_deref(), self.unit_id).config_key())
+            .flatten()
+    }
 }
 
 /// The shared runtime handed to the hook and the gesture watcher. Every field
@@ -387,21 +398,30 @@ impl Orchestrator {
         guard.by_key = by_key;
     }
 
-    /// One capture plan per online device, from the current config + app.
+    /// One normal capture plan per managed online device, plus a one-shot
+    /// raw-touchpad recovery plan for an unmanaged device with durable identity.
     fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
         self.devices
             .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| dev.online)
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
-                Some(plan_for_device(
-                    &self.config,
-                    &dev.config_key,
-                    route,
-                    self.current_app.as_deref(),
-                    rearm_generation,
-                ))
+                let touchpad_journal_id = dev.touchpad_journal_id();
+                if self.config.device_enabled(&dev.config_key) {
+                    Some(plan_for_device_with_touchpad(
+                        &self.config,
+                        &dev.config_key,
+                        route,
+                        self.current_app.as_deref(),
+                        touchpad_journal_id,
+                        rearm_generation,
+                    ))
+                } else {
+                    touchpad_journal_id.map(|journal_id| {
+                        touchpad_recovery_plan(&dev.config_key, route, journal_id, rearm_generation)
+                    })
+                }
             })
             .collect()
     }

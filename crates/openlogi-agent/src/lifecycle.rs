@@ -3,19 +3,19 @@
 //! Every process start walks the same ladder, and each state is a type:
 //!
 //! ```text
-//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──run──► exit
-//!         │                 │                                    │
-//!         └─ init failed    └─ dormant start nobody wanted       └─ signal / uninstall
+//! startup::bootstrap ──► Booted ──recover──► Recovered ──gate──► Wanted ──arm──► Armed
+//!         │                                       │                                  │
+//!         └─ init failed                          └─ dormant start nobody wanted      └─ exit
 //! ```
 //!
 //! The moves are the type protection for three contracts: the uninstall
 //! receiver travels inside the states (gate consumes it first, then the run
 //! loop — no third consumer can exist), the demand channel dies at
-//! [`Wanted::arm`], and arming without settling the dormancy question is
-//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is
-//! the gate. The gate *waits* only on macOS, where the sunk launch-at-login
-//! switch makes an unwanted login start possible; Windows and Linux only ever
-//! start wanted, so their gate passes unconditionally.
+//! [`Wanted::arm`], and neither gating before durable touchpad recovery nor
+//! arming without settling the dormancy question is representable. The gate
+//! *waits* only on macOS, where the sunk launch-at-login switch makes an
+//! unwanted login start possible; Windows and Linux only ever start wanted,
+//! so their gate passes unconditionally.
 
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -28,6 +28,7 @@ use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::hook;
+use openlogi_agent_core::touchpad_monitor::TouchpadMonitor;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::InventoryEvent;
 use openlogi_core::config::Config;
@@ -75,18 +76,19 @@ pub(crate) async fn run(
     else {
         return;
     };
+    let recovered = booted.recover_pending_touchpads().await;
     #[cfg(target_os = "macos")]
-    let Some(wanted) = booted.gate().await else {
+    let Some(wanted) = recovered.gate().await else {
         return;
     };
     #[cfg(not(target_os = "macos"))]
-    let wanted = booted.gate();
+    let wanted = recovered.gate();
     wanted.arm().run().await;
 }
 
 /// A bootstrapped, not-yet-armed agent: the IPC socket is serving, nothing
-/// user-visible has happened. The only ways out are [`Self::gate`] and being
-/// dropped (exit).
+/// user-visible has happened. It must resolve any durable raw-touchpad record
+/// before it can reach the dormancy gate.
 struct Booted {
     core: Core,
     signals: ShutdownSignals,
@@ -129,17 +131,29 @@ impl Booted {
         })
     }
 
+    async fn recover_pending_touchpads(self) -> Recovered {
+        startup::recover_pending_touchpads(&self.core.shared).await;
+        Recovered(self)
+    }
+}
+
+/// A bootstrapped agent whose durable touchpad recovery pass has completed or
+/// safely deferred. Only this state may decide whether the process is wanted.
+struct Recovered(Booted);
+
+impl Recovered {
     /// The dormancy gate. The service plist always carries the login trigger
     /// (`SuccessfulExit` implies `RunAtLoad`), so preference-off plus no
     /// client in sight means "launchd ran us at login the user opted out
     /// of" — wait briefly, then leave with the `exit(0)` launchd will not
-    /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
+    /// respawn. Demand is a GUI or diagnostic declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
     #[cfg(target_os = "macos")]
-    async fn gate(mut self) -> Option<Wanted> {
-        if self.launch_at_login {
-            return Some(Wanted(self));
+    async fn gate(self) -> Option<Wanted> {
+        let mut booted = self.0;
+        if booted.launch_at_login {
+            return Some(Wanted(booted));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
         // The deadline is absolute: a served-but-not-arming client does not
@@ -148,10 +162,10 @@ impl Booted {
         tokio::pin!(deadline);
         loop {
             tokio::select! {
-                Some(kind) = self.core.demand.recv() => match kind {
-                    ClientKind::Gui => {
-                        info!("GUI connected — arming");
-                        return Some(Wanted(self));
+                Some(kind) = booted.core.demand.recv() => match kind {
+                    ClientKind::Gui | ClientKind::Diagnostic => {
+                        info!(client = ?kind, "arming client connected — arming");
+                        return Some(Wanted(booted));
                     }
                     kind => info!(client = ?kind, "served while dormant — not arming"),
                 },
@@ -159,11 +173,11 @@ impl Booted {
                     info!("no arming demand — exiting until wanted");
                     return None;
                 }
-                () = self.signals.recv() => {
+                () = booted.signals.recv() => {
                     info!("shutdown signal while dormant — exiting");
                     return None;
                 }
-                Some(()) = self.uninstalled.recv() => {
+                Some(()) = booted.uninstalled.recv() => {
                     info!("uninstalled while dormant — exiting");
                     return None;
                 }
@@ -175,13 +189,13 @@ impl Booted {
     /// was asked for, so the gate passes unconditionally.
     #[cfg(not(target_os = "macos"))]
     fn gate(self) -> Wanted {
-        Wanted(self)
+        Wanted(self.0)
     }
 }
 
 /// A booted agent whose dormancy question is settled: somebody wants it
-/// running. [`Booted::gate`] is the only producer, so an agent that never
-/// consulted the gate cannot arm.
+/// running. [`Recovered::gate`] is the only producer, so an agent that never
+/// recovered durable state or consulted the gate cannot arm.
 struct Wanted(Booted);
 
 impl Wanted {
@@ -209,6 +223,7 @@ impl Wanted {
             shared,
             observable,
             event_monitor,
+            touchpad_monitor,
             inputs,
             ring_haptics,
             demand,
@@ -221,6 +236,7 @@ impl Wanted {
             shared,
             observable,
             event_monitor,
+            touchpad_monitor,
             inputs,
             ring_haptics,
             signals,
@@ -239,6 +255,7 @@ struct Armed {
     shared: SharedRuntime,
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
+    touchpad_monitor: Arc<TouchpadMonitor>,
     inputs: InputServices,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
@@ -259,7 +276,11 @@ impl Armed {
         request_input_monitoring().await;
 
         // HID++ watchers need no Accessibility — start them up front.
-        startup::spawn_hidpp_watchers(&self.shared, &self.inputs);
+        startup::spawn_hidpp_watchers(
+            &self.shared,
+            &self.inputs,
+            Arc::clone(&self.touchpad_monitor),
+        );
         let mut watchers = startup::spawn_state_watchers(&self.shared);
 
         info!("openlogi-agent started");

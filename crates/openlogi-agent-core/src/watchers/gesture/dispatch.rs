@@ -2,11 +2,14 @@
 
 mod wheel;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_core::touchpad::{
+    GestureRecognition, TouchFrame, TouchpadGesture, TouchpadGestureRecognizer,
+};
 use openlogi_hid::CapturedInput;
 use tracing::debug;
 
@@ -95,6 +98,80 @@ impl SessionWheels {
     }
 }
 
+#[derive(Default)]
+struct TouchpadRuntime {
+    recognizer: TouchpadGestureRecognizer,
+    frozen_bindings: Option<BTreeMap<ButtonId, Action>>,
+    frozen_actions_enabled: bool,
+}
+
+impl TouchpadRuntime {
+    fn update(
+        &mut self,
+        frame: &TouchFrame,
+        current_bindings: &BTreeMap<ButtonId, Action>,
+        actions_enabled: bool,
+    ) -> Option<(ButtonId, Action)> {
+        if self.frozen_bindings.is_none() {
+            self.frozen_bindings = Some(current_bindings.clone());
+            self.frozen_actions_enabled = actions_enabled;
+        }
+        match self.recognizer.update(frame) {
+            GestureRecognition::Gesture(gesture)
+                if self.frozen_actions_enabled && actions_enabled =>
+            {
+                self.action(gesture)
+            }
+            GestureRecognition::Pending
+            | GestureRecognition::NativeScroll
+            | GestureRecognition::Gesture(_) => None,
+        }
+    }
+
+    fn end(&mut self, actions_enabled: bool) -> Option<(ButtonId, Action)> {
+        let action = self
+            .recognizer
+            .end()
+            .filter(|_| self.frozen_actions_enabled && actions_enabled)
+            .and_then(|gesture| self.action(gesture));
+        self.frozen_bindings = None;
+        self.frozen_actions_enabled = false;
+        action
+    }
+
+    fn cancel(&mut self) {
+        self.recognizer.cancel();
+        self.frozen_bindings = None;
+        self.frozen_actions_enabled = false;
+    }
+
+    fn action(&self, gesture: TouchpadGesture) -> Option<(ButtonId, Action)> {
+        let trigger = gesture.trigger();
+        self.frozen_bindings
+            .as_ref()?
+            .get(&trigger)
+            .cloned()
+            .map(|action| (trigger, action))
+    }
+}
+
+#[derive(Default)]
+struct SessionTouchpads(HashMap<HidppSessionId, TouchpadRuntime>);
+
+impl SessionTouchpads {
+    fn for_session(&mut self, session: &HidppSessionId) -> &mut TouchpadRuntime {
+        self.0.entry(session.clone()).or_default()
+    }
+
+    fn cancel_session(&mut self, session: &HidppSessionId) {
+        self.0.remove(session);
+    }
+
+    fn retain_devices(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.0.retain(|session, _| keep(session.device_key()));
+    }
+}
+
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
@@ -102,6 +179,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    touchpads: SessionTouchpads,
 }
 
 impl InputDispatcher {
@@ -112,6 +190,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            touchpads: SessionTouchpads::default(),
         }
     }
 
@@ -120,16 +199,23 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
+        self.touchpads.cancel_session(session);
     }
 
     /// Drop wheel state for devices that no longer have a capture session.
-    pub(super) fn retain_devices(&mut self, keep: impl FnMut(&str) -> bool) {
-        self.wheels.retain_devices(keep);
+    pub(super) fn retain_devices(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.wheels.retain_devices(&mut keep);
+        self.touchpads.retain_devices(keep);
     }
 
     /// Route one captured input from `session` to its bound action or
     /// re-synthesised scroll output.
-    pub(super) fn dispatch(&mut self, session: &HidppSessionId, input: CapturedInput) {
+    pub(super) fn dispatch(
+        &mut self,
+        session: &HidppSessionId,
+        input: CapturedInput,
+        touchpad_actions_enabled: bool,
+    ) {
         let key = session.device_key();
         let Ok(plans) = self.capture_plans.read() else {
             return;
@@ -140,26 +226,14 @@ impl InputDispatcher {
         };
         match input {
             CapturedInput::Gesture(button, direction) => {
-                let Some(press) = self.gesture_presses.get(session, button) else {
-                    debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
-                    return;
-                };
-                if let Some(action) = plan
-                    .gesture_bindings
-                    .get(&button)
-                    .and_then(|map| map.get(&direction))
-                {
-                    debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
-                        .outputs
-                        .actions
-                        .try_dispatch_while_pressed(press, action)
-                    {
-                        debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                    }
-                } else {
-                    debug!(key, %button, ?direction, "gesture with no binding — ignored");
-                }
+                Self::dispatch_gesture(
+                    &self.gesture_presses,
+                    &self.outputs,
+                    session,
+                    plan,
+                    button,
+                    direction,
+                );
             }
             CapturedInput::ButtonDown(button) => {
                 // A raw-XY gesture source owns its click/swipe map; its physical
@@ -189,15 +263,7 @@ impl InputDispatcher {
                 self.gesture_presses.end(session, button);
             }
             CapturedInput::ButtonPulse(button) => {
-                let binding = plan.bindings.get(&button);
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button pulse with no binding — ignored");
-                }
-                self.outputs
-                    .actions
-                    .dispatch_hidpp_button_pulse(session, button, binding);
+                Self::dispatch_button_pulse(&self.outputs, session, plan, button);
             }
             CapturedInput::Scroll {
                 increments,
@@ -224,7 +290,114 @@ impl InputDispatcher {
                     }
                 }
             }
+            CapturedInput::TouchpadFrame(frame) => {
+                Self::dispatch_touchpad_frame(
+                    &mut self.touchpads,
+                    &self.outputs,
+                    session,
+                    key,
+                    &frame,
+                    &plan.touchpad_bindings,
+                    touchpad_actions_enabled,
+                );
+            }
+            CapturedInput::TouchpadEnd => {
+                Self::end_touchpad_stroke(
+                    &mut self.touchpads,
+                    &self.outputs,
+                    session,
+                    key,
+                    touchpad_actions_enabled,
+                );
+            }
+            CapturedInput::TouchpadCancel => {
+                self.touchpads.for_session(session).cancel();
+            }
+            CapturedInput::TouchpadDroppedFrames(_) => {}
         }
+    }
+
+    fn dispatch_gesture(
+        gesture_presses: &GesturePresses,
+        outputs: &GestureOutputs,
+        session: &HidppSessionId,
+        plan: &DeviceCapturePlan,
+        button: ButtonId,
+        direction: GestureDirection,
+    ) {
+        let key = session.device_key();
+        let Some(press) = gesture_presses.get(session, button) else {
+            debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
+            return;
+        };
+        let Some(action) = plan
+            .gesture_bindings
+            .get(&button)
+            .and_then(|map| map.get(&direction))
+        else {
+            debug!(key, %button, ?direction, "gesture with no binding — ignored");
+            return;
+        };
+        debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+        if !outputs.actions.try_dispatch_while_pressed(press, action) {
+            debug!(key, %button, ?direction, "gesture press no longer active — ignored");
+        }
+    }
+
+    fn dispatch_button_pulse(
+        outputs: &GestureOutputs,
+        session: &HidppSessionId,
+        plan: &DeviceCapturePlan,
+        button: ButtonId,
+    ) {
+        let key = session.device_key();
+        let binding = plan.bindings.get(&button);
+        if let Some(binding) = binding {
+            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
+        } else {
+            debug!(key, ?button, "HID++ button pulse with no binding — ignored");
+        }
+        outputs
+            .actions
+            .dispatch_hidpp_button_pulse(session, button, binding);
+    }
+
+    fn dispatch_touchpad_frame(
+        touchpads: &mut SessionTouchpads,
+        outputs: &GestureOutputs,
+        session: &HidppSessionId,
+        key: &str,
+        frame: &TouchFrame,
+        bindings: &BTreeMap<ButtonId, Action>,
+        actions_enabled: bool,
+    ) {
+        let action = touchpads
+            .for_session(session)
+            .update(frame, bindings, actions_enabled);
+        Self::dispatch_touchpad_action(outputs, key, action);
+    }
+
+    fn end_touchpad_stroke(
+        touchpads: &mut SessionTouchpads,
+        outputs: &GestureOutputs,
+        session: &HidppSessionId,
+        key: &str,
+        actions_enabled: bool,
+    ) {
+        let action = touchpads.for_session(session).end(actions_enabled);
+        Self::dispatch_touchpad_action(outputs, key, action);
+    }
+
+    fn dispatch_touchpad_action(
+        outputs: &GestureOutputs,
+        key: &str,
+        action: Option<(ButtonId, Action)>,
+    ) {
+        let Some((trigger, action)) = action else {
+            return;
+        };
+        debug!(key, %trigger, action = %action.label(), "touchpad gesture → action");
+        outputs.actions.dispatch(&action, Some(key));
     }
 }
 

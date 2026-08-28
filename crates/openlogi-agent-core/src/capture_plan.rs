@@ -12,10 +12,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, touchpad_bindings_for,
+};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_hid::DeviceRoute;
-use openlogi_hid::session::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
+use openlogi_hid::session::gesture::{
+    CaptureSessionMode, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+};
 
 /// Everything the capture watcher needs to run one device's session and
 /// dispatch its events.
@@ -25,6 +29,8 @@ pub struct DeviceCapturePlan {
     pub config_key: String,
     /// HID++ route the session opens.
     pub route: DeviceRoute,
+    /// Normal capture or one-shot durable raw-touchpad recovery.
+    pub session_mode: CaptureSessionMode,
     /// Per-button immediate or threshold bindings for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-direction map for each HID++ gesture source (the dedicated gesture
@@ -42,6 +48,15 @@ pub struct DeviceCapturePlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Effective one-shot actions for all raw-touchpad gestures. The
+    /// dispatcher snapshots this map on the first frame of a stroke.
+    pub touchpad_bindings: BTreeMap<ButtonId, Action>,
+    /// Stable device identity for the durable raw-mode journal. `None` means
+    /// the feature is absent or no serial/non-zero unit id is available, so
+    /// raw touchpad mode must not be armed.
+    pub touchpad_journal_id: Option<String>,
+    /// Whether the independent per-device gesture toggle requests raw capture.
+    pub capture_touchpad: bool,
     /// Capture re-arm generation from the orchestrator. Bumps on reconnect /
     /// system wake so sessions restart even when route and divert set match.
     pub rearm_generation: u64,
@@ -57,6 +72,20 @@ pub fn plan_for_device(
     config_key: &str,
     route: DeviceRoute,
     app: Option<&str>,
+    rearm_generation: u64,
+) -> DeviceCapturePlan {
+    plan_for_device_with_touchpad(config, config_key, route, app, None, rearm_generation)
+}
+
+/// Build one device's plan with an actually probed `0x6100` capability and
+/// stable raw-mode journal identity.
+#[must_use]
+pub fn plan_for_device_with_touchpad(
+    config: &Config,
+    config_key: &str,
+    route: DeviceRoute,
+    app: Option<&str>,
+    touchpad_journal_id: Option<String>,
     rearm_generation: u64,
 ) -> DeviceCapturePlan {
     let bindings = button_bindings_for(config, Some(config_key), app);
@@ -110,11 +139,40 @@ pub fn plan_for_device(
     DeviceCapturePlan {
         config_key: config_key.to_owned(),
         route,
+        session_mode: CaptureSessionMode::Continuous,
         bindings,
         gesture_bindings,
         divert_buttons,
         thumbwheel_bindings_nondefault,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
+        touchpad_bindings: touchpad_bindings_for(config, config_key, app),
+        capture_touchpad: config.touchpad_gestures_enabled(config_key)
+            && touchpad_journal_id.is_some(),
+        touchpad_journal_id,
+        rearm_generation,
+    }
+}
+
+/// Build a one-shot plan that only resolves a durable raw-touchpad journal.
+#[must_use]
+pub fn touchpad_recovery_plan(
+    config_key: &str,
+    route: DeviceRoute,
+    touchpad_journal_id: String,
+    rearm_generation: u64,
+) -> DeviceCapturePlan {
+    DeviceCapturePlan {
+        config_key: config_key.to_owned(),
+        route,
+        session_mode: CaptureSessionMode::TouchpadRecovery,
+        bindings: BTreeMap::new(),
+        gesture_bindings: BTreeMap::new(),
+        divert_buttons: Vec::new(),
+        thumbwheel_bindings_nondefault: false,
+        thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
+        touchpad_bindings: BTreeMap::new(),
+        touchpad_journal_id: Some(touchpad_journal_id),
+        capture_touchpad: false,
         rearm_generation,
     }
 }
@@ -345,5 +403,41 @@ mod tests {
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
             "an unbound gesture button must not be captured"
         );
+    }
+
+    #[test]
+    fn touchpad_capture_requires_both_opt_in_and_a_stable_probed_identity() {
+        let mut cfg = Config::default();
+        cfg.set_touchpad_gestures_enabled("unit:12345678", true);
+
+        let unsupported = plan_for_device(&cfg, "unit:12345678", route(), None, 0);
+        assert!(!unsupported.capture_touchpad);
+
+        let supported = plan_for_device_with_touchpad(
+            &cfg,
+            "unit:12345678",
+            route(),
+            None,
+            Some("unit:12345678".to_string()),
+            0,
+        );
+        assert!(supported.capture_touchpad);
+        assert_eq!(
+            supported.touchpad_journal_id.as_deref(),
+            Some("unit:12345678")
+        );
+    }
+
+    #[test]
+    fn disabled_touchpad_recovery_plan_captures_no_controls() {
+        let plan = touchpad_recovery_plan("unit:12345678", route(), "unit:12345678".to_string(), 7);
+
+        assert_eq!(plan.session_mode, CaptureSessionMode::TouchpadRecovery);
+        assert!(plan.bindings.is_empty());
+        assert!(plan.gesture_bindings.is_empty());
+        assert!(plan.divert_buttons.is_empty());
+        assert!(!plan.thumbwheel_bindings_nondefault);
+        assert!(plan.touchpad_bindings.is_empty());
+        assert!(!plan.capture_touchpad);
     }
 }

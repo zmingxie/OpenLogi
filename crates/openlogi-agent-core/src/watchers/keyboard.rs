@@ -146,27 +146,32 @@ pub fn spawn(
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.
 fn dispatch_input(
     session: &HidppSessionId,
-    input: CapturedInput,
+    input: &CapturedInput,
     spec: &KeyboardSpec,
     dispatcher: &ActionDispatcher,
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let binding = spec.bindings.get(&button);
+            let binding = spec.bindings.get(button);
             if let Some(binding) = binding {
                 info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.try_hidpp_button_down(session, button, binding);
+            dispatcher.try_hidpp_button_down(session, *button, binding);
         }
         CapturedInput::ButtonUp(button) => {
-            dispatcher.try_hidpp_button_up(session, button);
+            dispatcher.try_hidpp_button_up(session, *button);
         }
         CapturedInput::ButtonPulse(button) => {
-            dispatcher.dispatch_hidpp_button_pulse(session, button, spec.bindings.get(&button));
+            dispatcher.dispatch_hidpp_button_pulse(session, *button, spec.bindings.get(button));
         }
-        CapturedInput::Gesture(..) | CapturedInput::Scroll { .. } => {}
+        CapturedInput::Gesture(..)
+        | CapturedInput::Scroll { .. }
+        | CapturedInput::TouchpadFrame(_)
+        | CapturedInput::TouchpadEnd
+        | CapturedInput::TouchpadCancel
+        | CapturedInput::TouchpadDroppedFrames(_) => {}
     }
 }
 
@@ -220,7 +225,7 @@ async fn manage(
                 let Some(live_spec) = live_spec else {
                     continue;
                 };
-                dispatch_input(&input.session, input.input, &live_spec, &dispatcher);
+                dispatch_input(&input.session, &input.input, &live_spec, &dispatcher);
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release the capture

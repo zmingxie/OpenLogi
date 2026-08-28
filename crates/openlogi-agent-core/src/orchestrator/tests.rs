@@ -46,6 +46,16 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
     }
 }
 
+fn raw_touchpad_dev(key: &str, slot: u8, online: bool) -> AgentDevice {
+    let mut device = dev(key, slot, online);
+    device.serial = Some("casa-1".to_string());
+    device.capabilities = Some(Capabilities {
+        touchpad_raw_xy: true,
+        ..Capabilities::default()
+    });
+    device
+}
+
 fn raw_light_dev(key: &str) -> AgentDevice {
     AgentDevice {
         config_key: key.to_string(),
@@ -901,4 +911,24 @@ fn app_switch_republishes_capture_plans() {
     );
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+}
+
+#[test]
+fn disabled_raw_touchpad_keeps_only_a_recovery_plan() {
+    let mut config = Config::default();
+    config.set_device_enabled("casa", false);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![raw_touchpad_dev("casa", 1, true)];
+
+    let plans = orch.capture_plans_for();
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        plans[0].session_mode,
+        openlogi_hid::session::gesture::CaptureSessionMode::TouchpadRecovery
+    );
+    assert_eq!(
+        plans[0].touchpad_journal_id.as_deref(),
+        Some("serial:casa-1")
+    );
 }

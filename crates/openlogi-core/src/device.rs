@@ -128,6 +128,9 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// Raw multi-touch reports — HID++ `0x6100` (`TouchpadRawXy`).
+    #[serde(default)]
+    pub touchpad_raw_xy: bool,
 }
 
 impl Capabilities {
@@ -153,6 +156,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            touchpad_raw_xy: ids.contains(&0x6100),
         }
     }
 
@@ -173,6 +177,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +483,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    touchpad_raw_xy: false,
                 }),
             }],
         }
@@ -545,6 +551,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -561,6 +568,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             }
         );
         // No driving features → nothing offered.

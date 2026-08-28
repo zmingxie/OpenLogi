@@ -29,8 +29,13 @@ use std::time::Duration;
 
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
-use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::session::gesture::{
+    CaptureSessionMode, CaptureSpec, GESTURE_SOURCE_BUTTONS, TouchpadJournalStore,
+};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, FileTouchpadJournalStore, GestureError,
+    run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -39,6 +44,7 @@ use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
+use crate::touchpad_monitor::SharedTouchpadMonitor;
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
@@ -81,6 +87,7 @@ pub fn spawn(
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     outputs: GestureOutputs,
+    touchpad_monitor: SharedTouchpadMonitor,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -98,6 +105,7 @@ pub fn spawn(
             capture_channel,
             receiver_access,
             outputs,
+            touchpad_monitor,
         ));
     });
 }
@@ -112,8 +120,13 @@ fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
 }
 
 /// The [`CaptureSpec`] one device's session should run with right now.
-fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
+fn spec_for(plan: &DeviceCapturePlan, diagnostic_touchpad: bool) -> CaptureSpec {
+    let mode = match (plan.session_mode, diagnostic_touchpad) {
+        (CaptureSessionMode::TouchpadRecovery, true) => CaptureSessionMode::TouchpadOnly,
+        (mode, _) => mode,
+    };
     CaptureSpec {
+        mode,
         capture_thumbwheel: thumbwheel_armed(plan),
         // Derived from the dispatch maps, so the armed diverts and the maps
         // resolving their events can never drift apart.
@@ -123,6 +136,9 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
             .map(|(cid, _)| cid)
             .collect(),
         divert_buttons: plan.divert_buttons.clone(),
+        capture_touchpad: plan.capture_touchpad
+            || (diagnostic_touchpad && plan.touchpad_journal_id.is_some()),
+        touchpad_journal_id: plan.touchpad_journal_id.clone(),
     }
 }
 
@@ -137,10 +153,10 @@ struct SessionTarget {
 }
 
 impl SessionTarget {
-    fn for_plan(plan: &DeviceCapturePlan) -> Self {
+    fn for_plan(plan: &DeviceCapturePlan, diagnostic_touchpad: bool) -> Self {
         Self {
             route: plan.route.clone(),
-            spec: spec_for(plan),
+            spec: spec_for(plan, diagnostic_touchpad),
             wheel: WheelConfiguration::for_plan(plan),
             rearm_generation: plan.rearm_generation,
         }
@@ -164,6 +180,7 @@ struct CapturedEvent {
 
 struct SessionDone {
     session: HidppSessionId,
+    error: Option<GestureError>,
 }
 
 #[derive(Clone)]
@@ -171,6 +188,7 @@ struct SessionChannels {
     inputs: mpsc::UnboundedSender<CapturedEvent>,
     done: mpsc::UnboundedSender<SessionDone>,
     capture: CaptureChannel,
+    touchpad_journal: Option<Arc<dyn TouchpadJournalStore>>,
 }
 
 /// What a capture-session manager should do with one session-completion
@@ -213,8 +231,12 @@ fn accepts_input(input_session: &HidppSessionId, live: Option<&RunningSession>) 
 /// Whether the plan currently published for a device still describes the
 /// capture session that produced an input. This closes the interval between a
 /// plan publication and the manager's next teardown tick.
-fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> bool {
-    session.target == SessionTarget::for_plan(plan)
+fn session_matches_plan(
+    session: &RunningSession,
+    plan: &DeviceCapturePlan,
+    diagnostic_touchpad: bool,
+) -> bool {
+    session.target == SessionTarget::for_plan(plan, diagnostic_touchpad)
 }
 
 /// Snapshot the sessions that should be armed on this tick. Pairing owns the
@@ -223,6 +245,8 @@ fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> b
 fn wanted_sessions(
     receiver_access: &ReceiverAccess,
     capture_plans: &SharedCapturePlans,
+    touchpad_monitor: &SharedTouchpadMonitor,
+    touchpad_journal: Option<&dyn TouchpadJournalStore>,
 ) -> HashMap<String, SessionTarget> {
     if receiver_access.exclusive_requested() {
         return HashMap::new();
@@ -232,10 +256,121 @@ fn wanted_sessions(
         .map(|plans| {
             plans
                 .iter()
-                .map(|plan| (plan.config_key.clone(), SessionTarget::for_plan(plan)))
+                .filter_map(|plan| {
+                    let target = SessionTarget::for_plan(
+                        plan,
+                        touchpad_monitor.capture_requested_for(&plan.config_key),
+                    );
+                    if target.spec.mode == CaptureSessionMode::TouchpadRecovery {
+                        let journal_id = target.spec.touchpad_journal_id.as_deref()?;
+                        let journal = touchpad_journal?;
+                        match journal.load(journal_id) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => return None,
+                            Err(error) => warn!(
+                                key = plan.config_key,
+                                error = %error,
+                                "could not inspect touchpad raw-mode journal — attempting recovery"
+                            ),
+                        }
+                    }
+                    Some((plan.config_key.clone(), target))
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn clear_changed_conflicts(
+    blocked: &mut HashMap<String, SessionTarget>,
+    wanted: &HashMap<String, SessionTarget>,
+    monitor: &SharedTouchpadMonitor,
+) {
+    blocked.retain(|key, target| {
+        let unchanged = wanted.get(key) == Some(target);
+        if !unchanged {
+            monitor.clear_conflict(key);
+        }
+        unchanged
+    });
+}
+
+fn handle_session_done(
+    done: &SessionDone,
+    sessions: &mut HashMap<String, RunningSession>,
+    blocked: &mut HashMap<String, SessionTarget>,
+    monitor: &SharedTouchpadMonitor,
+    dispatcher: &mut InputDispatcher,
+) {
+    let key = done.session.device_key();
+    let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) else {
+        return;
+    };
+    let conflict = done.error.as_ref().and_then(|error| match error {
+        GestureError::TouchpadRawModeConflict { expected, actual } => Some((*expected, *actual)),
+        GestureError::Hid(_)
+        | GestureError::DeviceNotFound
+        | GestureError::DeviceUnreachable(_)
+        | GestureError::Hidpp(_) => None,
+    });
+    let target = sessions.get(key).map(|session| session.target.clone());
+    let recovered_touchpad = done.error.is_none()
+        && target
+            .as_ref()
+            .is_some_and(|target| target.spec.mode == CaptureSessionMode::TouchpadRecovery);
+    dispatcher.cancel_session(&done.session);
+    if let (Some((expected, actual)), Some(target)) = (conflict, target) {
+        blocked.insert(key.to_string(), target);
+        monitor.set_conflict(key, expected, actual);
+        warn!(
+            key,
+            expected, actual, "touchpad raw-mode conflict — capture blocked until its plan changes"
+        );
+    } else if unexpected && !recovered_touchpad {
+        warn!(key, "capture session ended unexpectedly, re-arming");
+    }
+    sessions.remove(key);
+}
+
+fn handle_captured_event(
+    event: CapturedEvent,
+    sessions: &HashMap<String, RunningSession>,
+    receiver_access: &ReceiverAccess,
+    capture_plans: &SharedCapturePlans,
+    touchpad_monitor: &SharedTouchpadMonitor,
+    input_dispatcher: &mut InputDispatcher,
+) {
+    let key = event.session.device_key();
+    let live = sessions.get(key);
+    let mut touchpad_actions_enabled = false;
+    let current = accepts_input(&event.session, live)
+        && !receiver_access.exclusive_requested()
+        && capture_plans.read().is_ok_and(|plans| {
+            plans
+                .iter()
+                .find(|plan| plan.config_key == key)
+                .is_some_and(|plan| {
+                    touchpad_actions_enabled = plan.capture_touchpad;
+                    live.is_some_and(|session| {
+                        session_matches_plan(
+                            session,
+                            plan,
+                            touchpad_monitor.capture_requested_for(key),
+                        )
+                    })
+                })
+        });
+    if current {
+        touchpad_monitor.record(key, &event.input);
+        input_dispatcher.dispatch(&event.session, event.input, touchpad_actions_enabled);
+    } else {
+        input_dispatcher.cancel_session(&event.session);
+        debug!(
+            key,
+            epoch = event.session.epoch(),
+            "input from a stale capture session — ignored"
+        );
+    }
 }
 
 /// Keep one capture session alive per online device, restarting a session when
@@ -246,9 +381,14 @@ async fn manage(
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     outputs: GestureOutputs,
+    touchpad_monitor: SharedTouchpadMonitor,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
+    // A competing manager's raw-mode write blocks this exact target. The block
+    // is cleared only when the plan disappears or changes, preventing a
+    // write-war rearm loop against Options+.
+    let mut blocked_touchpads: HashMap<String, SessionTarget> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut input_dispatcher = InputDispatcher::new(Arc::clone(&capture_plans), outputs);
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -259,10 +399,18 @@ async fn manage(
     // replacement once its teardown has drained, and stale completions are
     // ignored (see `on_done`).
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionDone>();
+    let touchpad_journal = match FileTouchpadJournalStore::in_state_dir() {
+        Ok(store) => Some(Arc::new(store) as Arc<dyn TouchpadJournalStore>),
+        Err(error) => {
+            warn!(error = %error, "touchpad raw-mode journal unavailable — raw capture disabled");
+            None
+        }
+    };
     let channels = SessionChannels {
         inputs: tx,
         done: done_tx,
         capture: capture_channel,
+        touchpad_journal,
     };
     // The capture-vs-pairing arbiter hands out one exclusive lease. All session
     // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
@@ -272,28 +420,26 @@ async fn manage(
     loop {
         tokio::select! {
             Some(event) = rx.recv() => {
-                let key = event.session.device_key();
-                let live = sessions.get(key);
-                let current = accepts_input(&event.session, live)
-                    && !receiver_access.exclusive_requested()
-                    && capture_plans.read().is_ok_and(|plans| {
-                        plans
-                            .iter()
-                            .find(|plan| plan.config_key == key)
-                            .is_some_and(|plan| live.is_some_and(|session| session_matches_plan(session, plan)))
-                    });
-                if current {
-                    input_dispatcher.dispatch(&event.session, event.input);
-                } else {
-                    input_dispatcher.cancel_session(&event.session);
-                    debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
-                }
+                handle_captured_event(
+                    event,
+                    &sessions,
+                    &receiver_access,
+                    &capture_plans,
+                    &touchpad_monitor,
+                    &mut input_dispatcher,
+                );
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want = wanted_sessions(&receiver_access, &capture_plans);
+                let want = wanted_sessions(
+                    &receiver_access,
+                    &capture_plans,
+                    &touchpad_monitor,
+                    channels.touchpad_journal.as_deref(),
+                );
+                clear_changed_conflicts(&mut blocked_touchpads, &want, &touchpad_monitor);
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
                 // A stopped session stays tracked — stop sender taken — until
@@ -312,7 +458,9 @@ async fn manage(
                 }
                 input_dispatcher.retain_devices(|key| want.contains_key(key));
                 for (key, target) in want {
-                    if sessions.contains_key(&key) {
+                    if sessions.contains_key(&key)
+                        || blocked_touchpads.get(&key) == Some(&target)
+                    {
                         continue;
                     }
                     // All sessions share one exclusive lease; acquire it with the
@@ -338,20 +486,19 @@ async fn manage(
                 }
             }
             Some(done) = done_rx.recv() => {
-                let key = done.session.device_key();
                 // A capture session's task has fully exited — its restore writes
                 // included — so dropping its entry lets the next tick start a
                 // fresh session for that device; the tick fires at most once per
                 // `TARGET_POLL`, which paces the respawn so a permanently failing
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
-                if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
-                    input_dispatcher.cancel_session(&done.session);
-                    if unexpected {
-                        warn!(key, "capture session ended unexpectedly, re-arming");
-                    }
-                    sessions.remove(key);
-                }
+                handle_session_done(
+                    &done,
+                    &mut sessions,
+                    &mut blocked_touchpads,
+                    &touchpad_monitor,
+                    &mut input_dispatcher,
+                );
             }
         }
     }
@@ -384,24 +531,30 @@ fn spawn_session(
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
     let slot = Arc::clone(&channels.capture);
+    let touchpad_journal = channels.touchpad_journal.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let backend = openlogi_hid::host::backend();
-        if let Err(e) = run_capture_session(
+        let error = run_capture_session(
             &*backend,
             session_route,
             session_spec,
+            touchpad_journal,
             session_tx,
             stop_rx,
             slot,
         )
         .await
-        {
+        .err();
+        if let Some(e) = error.as_ref() {
             debug!(error = %e, "capture session ended");
         }
         // Report completion so the manager can re-arm if this exit was
         // unexpected rather than a deliberate stop.
-        let _ = done.send(SessionDone { session: done_id });
+        let _ = done.send(SessionDone {
+            session: done_id,
+            error,
+        });
     });
     RunningSession {
         id,
