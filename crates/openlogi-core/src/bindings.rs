@@ -75,8 +75,7 @@ pub fn touchpad_bindings_for(
     app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, Action> {
     let stored = config.effective_bindings(config_key, app_bundle);
-    ButtonId::TOUCHPAD_GESTURES
-        .into_iter()
+    ButtonId::touchpad_gestures()
         .map(|trigger| {
             let action = match stored.get(&trigger) {
                 Some(Binding::Single(action)) => action.clone(),
@@ -246,7 +245,7 @@ mod tests {
         );
 
         let global = touchpad_bindings_for(&cfg, "casa", None);
-        assert_eq!(global.len(), ButtonId::TOUCHPAD_GESTURES.len());
+        assert_eq!(global.len(), ButtonId::touchpad_gestures().count());
         assert_eq!(
             global.get(&ButtonId::TouchpadThreeFingerSwipeUp),
             Some(&Action::Copy)

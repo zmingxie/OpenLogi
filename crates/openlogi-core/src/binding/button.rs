@@ -145,17 +145,24 @@ impl ButtonId {
         ButtonId::KeyVolumeUp,
     ];
 
-    /// Raw-touchpad gesture triggers, kept separate from [`ButtonId::ALL`] so
-    /// mouse defaults and mouse trigger lists do not acquire touchpad rows.
-    pub const TOUCHPAD_GESTURES: [ButtonId; 15] = [
+    /// Raw-touchpad gestures performed with two fingers.
+    pub const TOUCHPAD_TWO_FINGER: [ButtonId; 3] = [
         ButtonId::TouchpadTwoFingerTap,
         ButtonId::TouchpadTwoFingerPinchIn,
         ButtonId::TouchpadTwoFingerPinchOut,
+    ];
+
+    /// Raw-touchpad gestures performed with three fingers.
+    pub const TOUCHPAD_THREE_FINGER: [ButtonId; 5] = [
         ButtonId::TouchpadThreeFingerTap,
         ButtonId::TouchpadThreeFingerSwipeUp,
         ButtonId::TouchpadThreeFingerSwipeDown,
         ButtonId::TouchpadThreeFingerSwipeLeft,
         ButtonId::TouchpadThreeFingerSwipeRight,
+    ];
+
+    /// Raw-touchpad gestures performed with four fingers.
+    pub const TOUCHPAD_FOUR_FINGER: [ButtonId; 7] = [
         ButtonId::TouchpadFourFingerTap,
         ButtonId::TouchpadFourFingerSwipeUp,
         ButtonId::TouchpadFourFingerSwipeDown,
@@ -164,6 +171,16 @@ impl ButtonId {
         ButtonId::TouchpadFourFingerPinchIn,
         ButtonId::TouchpadFourFingerPinchOut,
     ];
+
+    /// Iterate over every raw-touchpad gesture trigger in canonical order.
+    /// Kept separate from [`ButtonId::ALL`] so mouse defaults and mouse trigger
+    /// lists do not acquire touchpad rows.
+    pub fn touchpad_gestures() -> impl Iterator<Item = ButtonId> {
+        Self::TOUCHPAD_TWO_FINGER
+            .into_iter()
+            .chain(Self::TOUCHPAD_THREE_FINGER)
+            .chain(Self::TOUCHPAD_FOUR_FINGER)
+    }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
@@ -193,7 +210,7 @@ impl ButtonId {
     /// Whether this identifier is one of the raw-touchpad gesture triggers.
     #[must_use]
     pub fn is_touchpad_gesture(self) -> bool {
-        Self::TOUCHPAD_GESTURES.contains(&self)
+        Self::touchpad_gestures().any(|trigger| trigger == self)
     }
 
     /// Human-readable label for popovers and tooltips.

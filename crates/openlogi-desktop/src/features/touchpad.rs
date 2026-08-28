@@ -23,28 +23,6 @@ use crate::ui::action::localized_action_label;
 use crate::ui::components::{PanelCard, Toggle, control_button};
 use crate::ui::theme::{self, Palette, Typography as _};
 
-const TWO_FINGER: [ButtonId; 3] = [
-    ButtonId::TouchpadTwoFingerTap,
-    ButtonId::TouchpadTwoFingerPinchIn,
-    ButtonId::TouchpadTwoFingerPinchOut,
-];
-const THREE_FINGER: [ButtonId; 5] = [
-    ButtonId::TouchpadThreeFingerTap,
-    ButtonId::TouchpadThreeFingerSwipeUp,
-    ButtonId::TouchpadThreeFingerSwipeDown,
-    ButtonId::TouchpadThreeFingerSwipeLeft,
-    ButtonId::TouchpadThreeFingerSwipeRight,
-];
-const FOUR_FINGER: [ButtonId; 7] = [
-    ButtonId::TouchpadFourFingerTap,
-    ButtonId::TouchpadFourFingerSwipeUp,
-    ButtonId::TouchpadFourFingerSwipeDown,
-    ButtonId::TouchpadFourFingerSwipeLeft,
-    ButtonId::TouchpadFourFingerSwipeRight,
-    ButtonId::TouchpadFourFingerPinchIn,
-    ButtonId::TouchpadFourFingerPinchOut,
-];
-
 /// Complete touchpad configuration surface. The caller capability-gates the
 /// tab; this function only projects and commits configuration through
 /// [`AppState`].
@@ -66,19 +44,19 @@ pub(crate) fn gesture_panel(cx: &mut App) -> impl IntoElement {
         .child(management_card(enabled, pal))
         .child(gesture_group(
             tr!("2-finger gestures"),
-            &TWO_FINGER,
+            &ButtonId::TOUCHPAD_TWO_FINGER,
             &bindings,
             pal,
         ))
         .child(gesture_group(
             tr!("3-finger gestures"),
-            &THREE_FINGER,
+            &ButtonId::TOUCHPAD_THREE_FINGER,
             &bindings,
             pal,
         ))
         .child(gesture_group(
             tr!("4-finger gestures"),
-            &FOUR_FINGER,
+            &ButtonId::TOUCHPAD_FOUR_FINGER,
             &bindings,
             pal,
         ))
